@@ -1,6 +1,7 @@
-import { useState } from 'react'
-import { Search, ChevronRight, Loader2 } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Search, ChevronRight, Loader2, Key } from 'lucide-react'
 import api from '../lib/api'
+import axios from 'axios'
 
 const ResultBlock = ({ title, items, fields }) => {
   if (!items?.length) return null
@@ -33,11 +34,11 @@ const ResultBlock = ({ title, items, fields }) => {
 }
 
 const ENDPOINTS = [
-  { label: 'GET /states', path: '/v1/states', params: [] },
-  { label: 'GET /districts', path: '/v1/districts', params: [{ key: 'stateId', placeholder: 'e.g. 1' }] },
-  { label: 'GET /subdistricts', path: '/v1/subdistricts', params: [{ key: 'districtId', placeholder: 'e.g. 101' }] },
-  { label: 'GET /villages', path: '/v1/villages', params: [{ key: 'subDistrictId', placeholder: 'e.g. 5001' }] },
-  { label: 'GET /search', path: '/v1/search', params: [{ key: 'q', placeholder: 'e.g. Pune' }, { key: 'type', placeholder: 'village | district | state' }] },
+  { label: 'GET /states',       path: '/v1/states',       params: [] },
+  { label: 'GET /districts',    path: '/v1/districts',    params: [{ key: 'stateId',       placeholder: 'e.g. 1' }] },
+  { label: 'GET /subdistricts', path: '/v1/subdistricts', params: [{ key: 'districtId',    placeholder: 'e.g. 101' }] },
+  { label: 'GET /villages',     path: '/v1/villages',     params: [{ key: 'subDistrictId', placeholder: 'e.g. 5001' }] },
+  { label: 'GET /search',       path: '/v1/search',       params: [{ key: 'q', placeholder: 'e.g. Gujarat' }, { key: 'type', placeholder: 'village | district | state' }] },
   { label: 'GET /autocomplete', path: '/v1/autocomplete', params: [{ key: 'q', placeholder: 'e.g. Mumb' }] },
 ]
 
@@ -49,6 +50,15 @@ export const ApiExplorerPage = () => {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [latency, setLatency] = useState(null)
+  const [apiKey, setApiKey] = useState(null)  // user's first active API key
+
+  // Auto-load user's first active API key for Explorer requests
+  useEffect(() => {
+    api.get('/b2b/keys').then(({ data }) => {
+      const active = (data.data || []).find(k => k.isActive)
+      if (active) setApiKey(active.prefix)
+    }).catch(() => {})
+  }, [])
 
   const handleEndpointChange = (ep) => {
     setSelected(ep)
@@ -62,15 +72,21 @@ export const ApiExplorerPage = () => {
     setLoading(true)
     setError('')
     setResult(null)
-    const query = { ...params, limit }
-    const queryStr = Object.entries(query)
+
+    // Build query string from params
+    const queryParams = { ...params, limit }
+    const queryStr = Object.entries(queryParams)
       .filter(([, v]) => v)
       .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
       .join('&')
-    const url = `/api${selected.path}${queryStr ? '?' + queryStr : ''}`
+
+    // Correct path: selected.path is '/v1/search', api baseURL is '…/api'
+    // → final URL: https://backend.vercel.app/api/v1/search ✅
+    const path = `${selected.path}${queryStr ? '?' + queryStr : ''}`
+
     const start = performance.now()
     try {
-      const { data } = await api.get(url.replace('/api/api', '/api'))
+      const { data } = await api.get(path)
       setLatency(Math.round(performance.now() - start))
       setResult(data)
     } catch (err) {
@@ -90,7 +106,21 @@ export const ApiExplorerPage = () => {
           <h1 className="page-title">API Explorer</h1>
           <p className="page-subtitle">Test live GeoVillage API endpoints in the browser</p>
         </div>
+        {apiKey && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--accent-dim)', border: '1px solid rgba(0,212,170,0.2)', borderRadius: 8, padding: '6px 12px', fontSize: '0.8125rem' }}>
+            <Key size={13} color="var(--accent)" />
+            <code style={{ color: 'var(--accent)' }}>{apiKey}…</code>
+          </div>
+        )}
       </div>
+
+      {!apiKey && (
+        <div className="card" style={{ marginBottom: 16, borderColor: 'rgba(245,158,11,0.3)', background: 'var(--warning-dim)' }}>
+          <p style={{ fontSize: '0.875rem', color: 'var(--warning)', margin: 0 }}>
+            ⚠️ No active API key found. Go to <strong>API Keys</strong> and generate one to use the Explorer.
+          </p>
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 20, alignItems: 'start' }}>
         {/* Endpoint List */}
@@ -153,13 +183,13 @@ export const ApiExplorerPage = () => {
               </div>
             </div>
 
-            <button className="btn btn-primary" onClick={handleRun} disabled={loading}>
+            <button className="btn btn-primary" onClick={handleRun} disabled={loading || !apiKey}>
               {loading ? <Loader2 size={15} style={{ animation: 'spin 0.7s linear infinite' }} /> : <Search size={15} />}
               {loading ? 'Running...' : 'Run Request'}
             </button>
           </div>
 
-          {/* Response */}
+          {/* Error */}
           {error && (
             <div className="card" style={{ borderColor: 'rgba(244,63,94,0.3)', background: 'var(--danger-dim)' }}>
               <div className="card-header"><span style={{ color: 'var(--danger)', fontWeight: 600 }}>Error Response</span></div>
@@ -167,6 +197,7 @@ export const ApiExplorerPage = () => {
             </div>
           )}
 
+          {/* Success */}
           {result && !error && (
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
@@ -178,7 +209,6 @@ export const ApiExplorerPage = () => {
                 )}
               </div>
 
-              {/* Visual table for geo results */}
               {Array.isArray(result.data) && result.data.length > 0 && (
                 <ResultBlock
                   title="Results"
@@ -187,7 +217,12 @@ export const ApiExplorerPage = () => {
                 />
               )}
 
-              {/* Raw JSON toggle */}
+              {Array.isArray(result.data) && result.data.length === 0 && (
+                <div className="card" style={{ textAlign: 'center', padding: 40 }}>
+                  <p style={{ color: 'var(--text-muted)' }}>No results found</p>
+                </div>
+              )}
+
               <details>
                 <summary style={{ cursor: 'pointer', fontSize: '0.8125rem', color: 'var(--text-muted)', padding: '8px 0', userSelect: 'none' }}>
                   View raw JSON

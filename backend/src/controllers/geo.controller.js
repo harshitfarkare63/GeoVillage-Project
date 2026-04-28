@@ -119,7 +119,7 @@ const getVillages = async (req, res) => {
 
 // ─────────────────────────────────────────────
 // GET /api/v1/search?q=&type=
-// Uses PostgreSQL trigram fuzzy search
+// Uses ILIKE search with optional trigram similarity boost
 // ─────────────────────────────────────────────
 const search = async (req, res) => {
   const { q, type, limit } = searchQuerySchema.parse(req.query);
@@ -130,33 +130,51 @@ const search = async (req, res) => {
   if (cached) return res.json(cached);
 
   const results = [];
+  const pattern = `%${q}%`;
 
+  // Village search — try trigram first, fall back to ILIKE
   if (!type || type === 'village') {
-    const villages = await prisma.$queryRaw`
-      SELECT id, name, 'village' as type, "subDistrictId"
-      FROM villages
-      WHERE name % ${q} OR name ILIKE ${'%' + q + '%'}
-      ORDER BY similarity(name, ${q}) DESC
-      LIMIT ${limit}
-    `;
-    results.push(...villages);
+    try {
+      const villages = await prisma.$queryRaw`
+        SELECT id, name, 'village' as type, "subDistrictId"
+        FROM villages
+        WHERE name % ${q} OR name ILIKE ${pattern}
+        ORDER BY similarity(name, ${q}) DESC
+        LIMIT ${limit}
+      `;
+      results.push(...villages);
+    } catch (_trigramErr) {
+      // pg_trgm not enabled — fall back to pure ILIKE
+      const villages = await prisma.$queryRaw`
+        SELECT id, name, 'village' as type, "subDistrictId"
+        FROM villages
+        WHERE name ILIKE ${pattern}
+        ORDER BY name ASC
+        LIMIT ${limit}
+      `;
+      results.push(...villages);
+    }
   }
 
+  // District search
   if (!type || type === 'district') {
     const districts = await prisma.$queryRaw`
       SELECT id, name, 'district' as type, "stateId"
       FROM districts
-      WHERE name ILIKE ${'%' + q + '%'}
+      WHERE name ILIKE ${pattern}
+      ORDER BY name ASC
       LIMIT ${Math.ceil(limit / 3)}
     `;
     results.push(...districts);
   }
 
+  // State search
   if (!type || type === 'state') {
     const states = await prisma.$queryRaw`
       SELECT id, name, 'state' as type
       FROM states
-      WHERE name ILIKE ${'%' + q + '%'}
+      WHERE name ILIKE ${pattern}
+      ORDER BY name ASC
       LIMIT 10
     `;
     results.push(...states);
@@ -166,6 +184,7 @@ const search = async (req, res) => {
   await set(cacheKey, response, ttl);
   res.json(response);
 };
+
 
 // ─────────────────────────────────────────────
 // GET /api/v1/autocomplete?q=
