@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
 GeoVillage API — MDDS Dataset ETL Pipeline
-Handles Excel/CSV import → validation → normalization → batch upsert → integrity check
+Supports official MDDS Excel format with columns:
+  MDDS STC, STATE NAME, MDDS DTC, DISTRICT,
+  MDDS SUB_DT, SUB DISTRICT NAME, MDDS PLCN, AREA NAME
 """
 
 import os
+import sys
 import logging
-import hashlib
 import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
@@ -20,8 +22,8 @@ load_dotenv()
 # CONFIGURATION
 # ─────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL")
-BATCH_SIZE = 5000
-LOG_FILE = f"etl_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+BATCH_SIZE   = 5000
+LOG_FILE     = f"etl_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,14 +36,34 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
-# REQUIRED COLUMNS IN INPUT FILE
+# MDDS COLUMN MAPPING → internal names
+# Maps your Excel headers → what the pipeline uses internally
 # ─────────────────────────────────────────────
-REQUIRED_COLUMNS = {
-    "state_name", "state_code",
-    "district_name",
-    "subdistrict_name",
-    "village_name",
+COLUMN_MAP = {
+    # MDDS official column name  : internal name
+    "mdds stc"        : "state_code",
+    "state name"      : "state_name",
+    "mdds dtc"        : "district_code",
+    "district"        : "district_name",
+    "mdds sub_dt"     : "subdistrict_code",
+    "sub district name": "subdistrict_name",
+    "mdds plcn"       : "village_code",
+    "area name"       : "village_name",
+
+    # Also handle common alternative spellings
+    "state"           : "state_name",
+    "district name"   : "district_name",
+    "sub_district"    : "subdistrict_name",
+    "subdistrict"     : "subdistrict_name",
+    "village"         : "village_name",
+    "village name"    : "village_name",
+    "place name"      : "village_name",
+    "pincode"         : "pincode",
+    "pin code"        : "pincode",
+    "pin"             : "pincode",
 }
+
+REQUIRED_INTERNAL = {"state_name", "district_name", "subdistrict_name", "village_name"}
 
 # ─────────────────────────────────────────────
 # STEP 1: LOAD FILE
@@ -51,7 +73,7 @@ def load_file(filepath: str) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {filepath}")
 
-    log.info(f"Loading file: {filepath}")
+    log.info(f"Loading: {filepath}")
     if path.suffix in [".xlsx", ".xls"]:
         df = pd.read_excel(filepath, dtype=str)
     elif path.suffix == ".csv":
@@ -59,27 +81,57 @@ def load_file(filepath: str) -> pd.DataFrame:
     else:
         raise ValueError(f"Unsupported format: {path.suffix}. Use .xlsx or .csv")
 
-    log.info(f"Loaded {len(df):,} rows with {len(df.columns)} columns")
+    log.info(f"Loaded {len(df):,} rows | Columns: {list(df.columns)}")
     return df
 
 # ─────────────────────────────────────────────
-# STEP 2: VALIDATE SCHEMA
+# STEP 2: MAP MDDS COLUMNS → internal names
 # ─────────────────────────────────────────────
-def validate_schema(df: pd.DataFrame):
-    cols = {c.lower().strip() for c in df.columns}
-    missing = REQUIRED_COLUMNS - cols
+def map_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # Normalize column names: lowercase + strip spaces
+    df.columns = [c.lower().strip() for c in df.columns]
+
+    log.info(f"Detected columns: {list(df.columns)}")
+
+    rename = {}
+    for col in df.columns:
+        if col in COLUMN_MAP:
+            rename[col] = COLUMN_MAP[col]
+
+    df = df.rename(columns=rename)
+    log.info(f"Mapped columns: {rename}")
+
+    # Check required columns exist after mapping
+    missing = REQUIRED_INTERNAL - set(df.columns)
     if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-    log.info("Schema validation passed ✅")
+        log.error(f"\n❌ Missing required columns after mapping: {missing}")
+        log.error(f"   Your Excel columns (lowercased): {list(df.columns)}")
+        log.error("   Add the missing columns to your file or update COLUMN_MAP in this script.")
+        sys.exit(1)
+
+    log.info("Column mapping ✅")
+    return df
 
 # ─────────────────────────────────────────────
 # STEP 3: CLEAN DATA
 # ─────────────────────────────────────────────
 def clean_data(df: pd.DataFrame) -> pd.DataFrame:
-    df.columns = [c.lower().strip().replace(" ", "_") for c in df.columns]
-    str_cols = df.select_dtypes(include="object").columns
-    df[str_cols] = df[str_cols].apply(lambda x: x.str.strip().str.title())
-    df.dropna(subset=["village_name", "subdistrict_name", "district_name", "state_name"], inplace=True)
+    # Drop rows missing any key field
+    df = df.dropna(subset=["state_name", "district_name", "subdistrict_name", "village_name"])
+
+    # Title-case string columns, strip whitespace
+    for col in ["state_name", "district_name", "subdistrict_name", "village_name"]:
+        df[col] = df[col].str.strip().str.title()
+
+    # Codes: uppercase, strip
+    for col in ["state_code", "district_code", "subdistrict_code", "village_code"]:
+        if col in df.columns:
+            df[col] = df[col].str.strip().str.upper()
+
+    # Pincode: digits only, max 6 chars
+    if "pincode" in df.columns:
+        df["pincode"] = df["pincode"].str.extract(r"(\d{5,6})")[0]
+
     log.info(f"After cleaning: {len(df):,} rows remain")
     return df
 
@@ -88,59 +140,62 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 def deduplicate(df: pd.DataFrame) -> pd.DataFrame:
     before = len(df)
-    df["_dedup_key"] = (
-        df["village_name"] + "|" + df["subdistrict_name"] + "|" +
-        df["district_name"] + "|" + df["state_name"]
+    df["_key"] = (
+        df["village_name"] + "|" +
+        df["subdistrict_name"] + "|" +
+        df["district_name"] + "|" +
+        df["state_name"]
     )
-    df.drop_duplicates(subset=["_dedup_key"], inplace=True)
-    df.drop(columns=["_dedup_key"], inplace=True)
-    log.info(f"Deduplication removed {before - len(df):,} rows. {len(df):,} remain.")
+    df = df.drop_duplicates(subset=["_key"]).drop(columns=["_key"])
+    log.info(f"Deduplication: removed {before - len(df):,} duplicates | {len(df):,} remain")
     return df
 
 # ─────────────────────────────────────────────
-# STEP 5: BATCH INSERT WITH HIERARCHY MAPPING
+# STEP 5: INSERT INTO DATABASE
 # ─────────────────────────────────────────────
 def import_to_db(df: pd.DataFrame):
+    log.info(f"Connecting to database...")
     conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
+    cur  = conn.cursor()
 
-    # ID caches to avoid repeated lookups
-    country_id = _ensure_country(cur, "India", "IND")
-    state_cache = {}
+    country_id    = _ensure_country(cur, "India", "IND")
+    conn.commit()
+
+    state_cache   = {}
     district_cache = {}
-    subdist_cache = {}
+    subdist_cache  = {}
 
     success_count = 0
-    error_count = 0
-
-    chunks = [df.iloc[i:i+BATCH_SIZE] for i in range(0, len(df), BATCH_SIZE)]
-    log.info(f"Processing {len(chunks)} batches of {BATCH_SIZE} rows...")
-
+    error_count   = 0
     village_batch = []
 
+    total_rows = len(df)
+    chunks = [df.iloc[i:i + BATCH_SIZE] for i in range(0, total_rows, BATCH_SIZE)]
+    log.info(f"Processing {len(chunks)} batches of up to {BATCH_SIZE} rows each...")
+
     for batch_num, chunk in enumerate(chunks, 1):
-        log.info(f"Batch {batch_num}/{len(chunks)} — {len(chunk)} rows")
+        log.info(f"  Batch {batch_num}/{len(chunks)} — {len(chunk)} rows")
         try:
             for _, row in chunk.iterrows():
                 try:
-                    state_name = row["state_name"]
+                    state_name    = row["state_name"]
                     district_name = row["district_name"]
-                    subdist_name = row["subdistrict_name"]
-                    village_name = row["village_name"]
-                    pincode = row.get("pincode", None)
+                    subdist_name  = row["subdistrict_name"]
+                    village_name  = row["village_name"]
+                    state_code    = row.get("state_code", state_name[:5].upper()) if "state_code" in row else state_name[:5].upper()
+                    pincode       = row.get("pincode", None) if "pincode" in row else None
+                    if pd.isna(pincode): pincode = None
 
-                    # Upsert hierarchy
-                    state_id = _ensure_state(cur, state_cache, state_name, row.get("state_code", ""), country_id)
-                    dist_id = _ensure_district(cur, district_cache, district_name, state_id)
+                    state_id   = _ensure_state(cur, state_cache, state_name, state_code, country_id)
+                    dist_id    = _ensure_district(cur, district_cache, district_name, state_id)
                     subdist_id = _ensure_subdistrict(cur, subdist_cache, subdist_name, dist_id)
 
                     village_batch.append((village_name, pincode, subdist_id))
 
                 except Exception as row_err:
                     error_count += 1
-                    log.warning(f"Row error: {row_err} | Row: {row.to_dict()}")
+                    log.warning(f"  Row skipped: {row_err}")
 
-            # Batch insert villages
             if village_batch:
                 execute_values(
                     cur,
@@ -155,93 +210,103 @@ def import_to_db(df: pd.DataFrame):
                 village_batch = []
 
             conn.commit()
+
         except Exception as batch_err:
             conn.rollback()
-            log.error(f"Batch {batch_num} failed: {batch_err}")
+            log.error(f"  Batch {batch_num} failed and rolled back: {batch_err}")
             error_count += len(chunk)
 
     cur.close()
     conn.close()
-    log.info(f"\n✅ Import complete: {success_count:,} inserted, {error_count:,} errors")
+    log.info(f"\n✅ Import done: {success_count:,} villages inserted | {error_count:,} errors")
 
 # ─────────────────────────────────────────────
-# HIERARCHY HELPERS (with caching)
+# HIERARCHY HELPERS (cached upserts)
 # ─────────────────────────────────────────────
 def _ensure_country(cur, name, code):
-    cur.execute("INSERT INTO countries (name, code) VALUES (%s, %s) ON CONFLICT (code) DO NOTHING RETURNING id", (name, code))
+    cur.execute(
+        "INSERT INTO countries (name, code) VALUES (%s, %s) ON CONFLICT (code) DO NOTHING",
+        (name, code)
+    )
     cur.execute("SELECT id FROM countries WHERE code = %s", (code,))
     return cur.fetchone()[0]
 
 def _ensure_state(cur, cache, name, code, country_id):
     key = f"{name}|{country_id}"
-    if key in cache: return cache[key]
-    cur.execute("""
-        INSERT INTO states (name, code, "countryId") VALUES (%s, %s, %s)
-        ON CONFLICT (code, "countryId") DO NOTHING
-    """, (name, code or name[:5].upper(), country_id))
+    if key in cache:
+        return cache[key]
+    cur.execute(
+        'INSERT INTO states (name, code, "countryId") VALUES (%s, %s, %s) ON CONFLICT (code, "countryId") DO NOTHING',
+        (name, code, country_id)
+    )
     cur.execute('SELECT id FROM states WHERE name = %s AND "countryId" = %s', (name, country_id))
-    state_id = cur.fetchone()[0]
-    cache[key] = state_id
-    return state_id
+    row = cur.fetchone()
+    cache[key] = row[0]
+    return row[0]
 
 def _ensure_district(cur, cache, name, state_id):
     key = f"{name}|{state_id}"
-    if key in cache: return cache[key]
-    cur.execute('INSERT INTO districts (name, "stateId") VALUES (%s, %s) ON CONFLICT DO NOTHING', (name, state_id))
+    if key in cache:
+        return cache[key]
+    cur.execute(
+        'INSERT INTO districts (name, "stateId") VALUES (%s, %s) ON CONFLICT DO NOTHING',
+        (name, state_id)
+    )
     cur.execute('SELECT id FROM districts WHERE name = %s AND "stateId" = %s', (name, state_id))
-    dist_id = cur.fetchone()[0]
-    cache[key] = dist_id
-    return dist_id
+    row = cur.fetchone()
+    cache[key] = row[0]
+    return row[0]
 
 def _ensure_subdistrict(cur, cache, name, dist_id):
     key = f"{name}|{dist_id}"
-    if key in cache: return cache[key]
-    cur.execute('INSERT INTO sub_districts (name, "districtId") VALUES (%s, %s) ON CONFLICT DO NOTHING', (name, dist_id))
+    if key in cache:
+        return cache[key]
+    cur.execute(
+        'INSERT INTO sub_districts (name, "districtId") VALUES (%s, %s) ON CONFLICT DO NOTHING',
+        (name, dist_id)
+    )
     cur.execute('SELECT id FROM sub_districts WHERE name = %s AND "districtId" = %s', (name, dist_id))
-    subdist_id = cur.fetchone()[0]
-    cache[key] = subdist_id
-    return subdist_id
+    row = cur.fetchone()
+    cache[key] = row[0]
+    return row[0]
 
 # ─────────────────────────────────────────────
-# STEP 6: INTEGRITY VERIFICATION
+# STEP 6: VERIFY ROW COUNTS
 # ─────────────────────────────────────────────
 def verify_integrity():
     conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
-    counts = {}
+    cur  = conn.cursor()
+    log.info("\n📊 Database row counts:")
     for table in ["countries", "states", "districts", "sub_districts", "villages"]:
         cur.execute(f"SELECT COUNT(*) FROM {table}")
-        counts[table] = cur.fetchone()[0]
+        count = cur.fetchone()[0]
+        log.info(f"   {table:20s}: {count:>10,}")
     cur.close()
     conn.close()
-    log.info("\n📊 Database row counts:")
-    for table, count in counts.items():
-        log.info(f"  {table}: {count:,}")
-    return counts
 
 # ─────────────────────────────────────────────
-# MAIN ENTRYPOINT
+# MAIN
 # ─────────────────────────────────────────────
 def run_pipeline(filepath: str):
     log.info("=" * 60)
-    log.info("🚀 GeoVillage ETL Pipeline Started")
+    log.info("🚀 GeoVillage MDDS ETL Pipeline")
     log.info("=" * 60)
 
     df = load_file(filepath)
-    validate_schema(df)
+    df = map_columns(df)
     df = clean_data(df)
     df = deduplicate(df)
     import_to_db(df)
     verify_integrity()
 
     log.info("=" * 60)
-    log.info("✅ Pipeline completed successfully")
+    log.info("✅ Pipeline completed")
     log.info(f"📄 Log saved to: {LOG_FILE}")
     log.info("=" * 60)
 
 if __name__ == "__main__":
-    import sys
     if len(sys.argv) < 2:
-        print("Usage: python etl_pipeline.py <path-to-dataset.xlsx>")
+        print("\nUsage:  python etl_pipeline.py <path-to-dataset.xlsx>")
+        print("Example: python etl_pipeline.py mdds_villages.xlsx\n")
         sys.exit(1)
     run_pipeline(sys.argv[1])

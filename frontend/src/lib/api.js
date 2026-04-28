@@ -1,10 +1,10 @@
 import axios from 'axios'
 
-// In production (Vercel), VITE_API_URL points to the deployed backend.
+// In production (Vercel), VITE_API_URL points to the deployed backend root.
 // In dev, Vite proxies /api → localhost:4000 so baseURL stays '/api'.
-const baseURL = import.meta.env.VITE_API_URL
-  ? `${import.meta.env.VITE_API_URL}/api`
-  : '/api'
+// Defensively strip any trailing /api from the env var to avoid /api/api/... doubling.
+const rawUrl = (import.meta.env.VITE_API_URL || '').replace(/\/api\/?$/, '')
+const baseURL = rawUrl ? `${rawUrl}/api` : '/api'
 
 const api = axios.create({ baseURL })
 
