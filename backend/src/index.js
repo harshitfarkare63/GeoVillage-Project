@@ -57,10 +57,14 @@ app.use(errorHandler);
 // ─────────────────────────────────────────────
 // START SERVER
 // ─────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n🚀 GeoVillage API running on http://localhost:${PORT}`);
-  console.log(`📦 Environment: ${process.env.NODE_ENV}`);
-  console.log(`📡 API Version: ${process.env.API_VERSION || 'v1'}\n`);
-});
+// Only bind port when running directly (local dev).
+// On Vercel, the app is imported as a serverless handler.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`\n🚀 GeoVillage API running on http://localhost:${PORT}`);
+    console.log(`📦 Environment: ${process.env.NODE_ENV}`);
+    console.log(`📡 API Version: ${process.env.API_VERSION || 'v1'}\n`);
+  });
+}
 
 module.exports = app;
