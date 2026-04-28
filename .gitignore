@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+.vercel/
+
+# Environment — NEVER commit real secrets
+.env
+.env.local
+.env.*.local
+
+# Keep the example template
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+nodemon-debug.log*
+logs/
+
+# Prisma generated client (regenerated on install)
+node_modules/.prisma/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+etl/*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+.idea/

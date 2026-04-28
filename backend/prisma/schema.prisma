@@ -1,0 +1,164 @@
+// This is your Prisma schema file for GeoVillage API
+// Run: npx prisma migrate dev --name init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────
+// GEOGRAPHIC HIERARCHY
+// ─────────────────────────────────────────────
+
+model Country {
+  id     Int     @id @default(autoincrement())
+  name   String  @unique
+  code   String  @unique @db.VarChar(3)
+  states State[]
+
+  @@map("countries")
+}
+
+model State {
+  id          Int               @id @default(autoincrement())
+  name        String
+  code        String            @db.VarChar(5)
+  countryId   Int
+  country     Country           @relation(fields: [countryId], references: [id])
+  districts   District[]
+  userAccess  UserStateAccess[]
+
+  @@unique([code, countryId])
+  @@index([countryId])
+  @@map("states")
+}
+
+model District {
+  id           Int           @id @default(autoincrement())
+  name         String
+  stateId      Int
+  state        State         @relation(fields: [stateId], references: [id])
+  subDistricts SubDistrict[]
+
+  @@index([stateId])
+  @@map("districts")
+}
+
+model SubDistrict {
+  id         Int       @id @default(autoincrement())
+  name       String
+  districtId Int
+  district   District  @relation(fields: [districtId], references: [id])
+  villages   Village[]
+
+  @@index([districtId])
+  @@map("sub_districts")
+}
+
+model Village {
+  id            Int         @id @default(autoincrement())
+  name          String
+  pincode       String?     @db.VarChar(6)
+  latitude      Float?
+  longitude     Float?
+  subDistrictId Int
+  subDistrict   SubDistrict @relation(fields: [subDistrictId], references: [id])
+
+  @@index([subDistrictId])
+  // NOTE: After migration, run this SQL manually for trigram search:
+  // CREATE EXTENSION IF NOT EXISTS pg_trgm;
+  // CREATE INDEX idx_village_name_trgm ON villages USING GIN (name gin_trgm_ops);
+  @@map("villages")
+}
+
+// ─────────────────────────────────────────────
+// USER & AUTH
+// ─────────────────────────────────────────────
+
+enum UserRole {
+  ADMIN
+  B2B_CLIENT
+}
+
+enum SubscriptionPlan {
+  FREE
+  PREMIUM
+  PRO
+  UNLIMITED
+}
+
+model User {
+  id           String           @id @default(uuid())
+  name         String
+  email        String           @unique
+  passwordHash String
+  role         UserRole         @default(B2B_CLIENT)
+  plan         SubscriptionPlan @default(FREE)
+  isActive     Boolean          @default(true)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  apiKeys     ApiKey[]
+  apiLogs     ApiLog[]
+  stateAccess UserStateAccess[]
+
+  @@index([email])
+  @@map("users")
+}
+
+model ApiKey {
+  id          String           @id @default(uuid())
+  keyHash     String           @unique   // SHA-256 of the actual key
+  prefix      String           @db.VarChar(20) // e.g. "gva_live_xxxxx" (first 16 chars shown)
+  plan        SubscriptionPlan @default(FREE)
+  dailyLimit  Int              @default(1000)
+  isActive    Boolean          @default(true)
+  expiresAt   DateTime?
+  lastUsedAt  DateTime?
+  createdAt   DateTime         @default(now())
+
+  userId  String
+  user    User     @relation(fields: [userId], references: [id])
+  apiLogs ApiLog[]
+
+  @@index([userId])
+  @@map("api_keys")
+}
+
+model ApiLog {
+  id             String   @id @default(uuid())
+  endpoint       String
+  method         String   @db.VarChar(10)
+  statusCode     Int
+  responseTimeMs Int
+  ipAddress      String?
+  userAgent      String?
+  createdAt      DateTime @default(now())
+
+  userId   String
+  user     User   @relation(fields: [userId], references: [id])
+  apiKeyId String
+  apiKey   ApiKey @relation(fields: [apiKeyId], references: [id])
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@map("api_logs")
+}
+
+model UserStateAccess {
+  id        String   @id @default(uuid())
+  userId    String
+  stateId   Int
+  grantedAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id])
+  state State @relation(fields: [stateId], references: [id])
+
+  @@unique([userId, stateId])
+  @@map("user_state_access")
+}
