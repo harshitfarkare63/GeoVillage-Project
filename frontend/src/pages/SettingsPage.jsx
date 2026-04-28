@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { CheckCircle, XCircle, AlertCircle, RefreshCw } from 'lucide-react'
+import api from '../lib/api'
 
 const StatusDot = ({ ok }) => (
   <div style={{ width: 10, height: 10, borderRadius: '50%', background: ok ? 'var(--success)' : 'var(--danger)', flexShrink: 0, boxShadow: ok ? '0 0 8px var(--success)' : '0 0 8px var(--danger)' }} />
@@ -11,9 +12,9 @@ export const SettingsPage = () => {
 
   const fetchHealth = () => {
     setLoading(true)
-    fetch('/health')
-      .then((r) => r.json())
-      .then(setHealth)
+    // Use the shared api client so it hits the backend URL, not the frontend domain
+    api.get('/health')
+      .then((r) => setHealth(r.data))
       .catch(() => setHealth({ status: 'error' }))
       .finally(() => setLoading(false))
   }

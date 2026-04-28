@@ -35,6 +35,7 @@ app.use(morgan('combined'));
 // ROUTES
 // ─────────────────────────────────────────────
 app.use('/health', healthRoutes);
+app.use('/api/health', healthRoutes);   // alias for frontend api client
 app.use('/api/v1', geoRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/b2b', b2bRoutes);
