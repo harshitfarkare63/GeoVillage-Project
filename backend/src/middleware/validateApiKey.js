@@ -75,18 +75,22 @@ const validateApiKey = async (req, res, next) => {
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+      // JWT payload uses { sub: userId } — extract it correctly
+      const jwtUserId = decoded.sub;
+
       // Look up the user's first active API key to populate billing context
       const apiKey = await prisma.apiKey.findFirst({
-        where:   { userId: decoded.userId || decoded.id, isActive: true },
+        where:   { userId: jwtUserId, isActive: true },
         include: { user: true },
         orderBy: { createdAt: 'asc' },
       });
 
       if (!apiKey) {
         // User authenticated but has no API key yet — still allow with JWT identity
-        req.apiKey = { id: null, userId: decoded.userId || decoded.id, plan: decoded.plan || 'FREE', dailyLimit: 1000, userRole: decoded.role, userName: decoded.name };
-        req.userId = decoded.userId || decoded.id;
-        req.user   = { id: decoded.userId || decoded.id, plan: decoded.plan || 'FREE', role: decoded.role, name: decoded.name };
+        req.apiKey = { id: null, userId: jwtUserId, plan: decoded.plan || 'FREE', dailyLimit: 1000, userRole: decoded.role, userName: decoded.name };
+        req.userId = jwtUserId;
+        // Keep .sub so b2b routes (req.user.sub) keep working
+        req.user   = { sub: jwtUserId, id: jwtUserId, plan: decoded.plan || 'FREE', role: decoded.role, name: decoded.name };
         return next();
       }
 
@@ -101,7 +105,8 @@ const validateApiKey = async (req, res, next) => {
 
       req.apiKey = keyData;
       req.userId = keyData.userId;
-      req.user   = { id: keyData.userId, plan: keyData.plan, role: keyData.userRole, name: keyData.userName };
+      // Keep .sub so b2b routes (req.user.sub) keep working
+      req.user   = { sub: keyData.userId, id: keyData.userId, plan: keyData.plan, role: keyData.userRole, name: keyData.userName };
       return next();
 
     } catch (_err) {
